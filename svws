@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# svws-linux-local – SVWS-Server + SVWS-Tools (podman) and SchILD-NRW 3 (Bottles/Wine) on Linux.
+# svws-linux-local – SVWS-Server + SVWS-Tools (podman) and SchILD-NRW 3 (Wine) on Linux.
 set -euo pipefail
 . "$(dirname "$(readlink -f "$0")")/lib/common.sh"
+. "$ROOT/lib/wine.sh"
 . "$ROOT/lib/server.sh"
-. "$ROOT/lib/bottle.sh"
 . "$ROOT/lib/reports.sh"
 
 usage() {
@@ -11,114 +11,123 @@ usage() {
 Usage: ./svws <command>
 
 Setup
-  setup          Install everything: Wine runner, bottle, SchILD-NRW 3, SVWS-Server,
-                 SVWS-Tools, reports, certificate, fonts (idempotent, re-run any time)
-  update         Update SchILD-NRW 3, server version, SVWS-Tools and all reports
+  setup        Install everything: Wine, SchILD-NRW 3, SVWS-Server, SVWS-Tools, reports,
+               certificate, fonts (idempotent – re-run any time)
+  update       Update SchILD-NRW 3, server version, SVWS-Tools and reports
+  desktop      Add "SchILD-NRW 3 (local)" to the application menu
 
 Daily use
-  schild         Start the server (if needed) and SchILD-NRW 3
-  dbconfig       Start SchILD_DBConfig (create the database connection)
-  up | down      Start / stop the SVWS-Server containers
-  status         Show versions, URLs and access data
-  logs           Follow the SVWS-Server log
+  schild       Start the server (if needed) and SchILD-NRW 3
+  dbconfig     Start SchILD_DBConfig (create the database connection, once)
+  up | down    Start / stop the SVWS-Server
+  status       Versions, URLs and access data
+  logs         Follow the SVWS-Server log
 
 Maintenance
-  reports        Sync the report collections only
-  tools          Install/update the SVWS-Tools web apps only
-  fonts          Re-apply font setup in the bottle
-  trust-cert     Re-import the server certificate into the bottle
-  test           Test the HTTPS connection from inside the bottle (like SchILD does)
-  reset-db       Replace the database with fresh SVWS test data
+  reports      Update the report collections only
+  tools        Install/update the SVWS-Tools web apps only
+  fonts        Re-apply the font setup
+  trust-cert   Re-import the server certificate into Wine
+  test         HTTPS test from inside Wine (what SchILD does)
+  reset-db     Replace the database with fresh test data
+  wine ARGS    Run any command in the SchILD Wine prefix (e.g. ./svws wine winecfg)
 EOF
 }
 
 preflight() {
-  need podman podman-compose flatpak curl git openssl rsync unzip python3 cabextract
-  flatpak info "$FLATPAK_APP" >/dev/null 2>&1 \
-    || die "Bottles is not installed: flatpak install flathub $FLATPAK_APP"
+  need podman curl python3 tar
+  [[ $(uname -m) == x86_64 ]] || die "only x86_64 is supported"
 }
 
 cmd_setup() {
   preflight
   env_init
-  runner_install
-  bottle_create
+  wine_install
+  prefix_init
   jet40_install
+  mdac_install
   vb6_install
   schild_install
   server_version_resolve
-  cert_init
+  info "SchILD-NRW $(schild_installed_version) expects SVWS-Server $SVWS_VERSION"
   server_first_start
   tools_install
   reports_sync
-  step "Configuring bottle"
-  bottle_trust_cert
-  bottle_fonts
-  step "Testing HTTPS from inside the bottle"
-  bottle_test && ok "SchILD can reach the SVWS-Server" || warn "connection test failed – see docs/troubleshooting.md"
+  step "Configuring Wine"
+  prefix_trust_cert
+  prefix_fonts
+  step "Testing HTTPS from inside Wine"
+  if prefix_test; then ok "SchILD can reach the SVWS-Server"; else warn "connection test failed – see docs/troubleshooting.md"; fi
   echo
   cmd_status
   cat <<EOF
 
-${c_bold}Next step (once):${c_off} ./svws dbconfig  → create a connection with the values above,
-then start SchILD with: ./svws schild
+${c_bold}Next:${c_off} ./svws dbconfig   → create a connection with the values above (once)
+      ./svws schild     → start SchILD-NRW 3
+      ./svws desktop    → optional menu entries
 EOF
 }
 
 cmd_update() {
   preflight
-  require_bottle
+  require_prefix
   schild_install
   server_version_resolve
   local running
-  running=$(podman inspect -f '{{.Config.Image}}' svws-local-server 2>/dev/null | sed 's/.*://' || true)
+  running=$(podman inspect -f '{{.ImageName}}' "$POD-server" 2>/dev/null | sed 's/.*://' || true)
   if [[ $running != "$SVWS_VERSION" ]]; then
     step "Switching SVWS-Server ${running:-?} → $SVWS_VERSION"
     server_recreate
+    prefix_trust_cert
   fi
   tools_install
   reports_sync
 }
 
 cmd_status() {
-  local prefix schild expected
-  prefix=$(bottle_path || true)
-  if [[ -n $prefix ]]; then PREFIX=$prefix; require_bottle; schild=$(schild_installed_version); expected=$(schild_expected_server); fi
+  local schild="" expected=""
+  if [[ -f $SCHILD_DIR/SchILD30.exe ]]; then schild=$(schild_installed_version); expected=$(schild_expected_server); fi
   cat <<EOF
 ${c_bold}SVWS Linux Local${c_off}
-  SchILD-NRW 3        ${schild:-not installed}   (bottle "$BOTTLE_NAME", runner $WINE_RUNNER)
-  SVWS-Server         $(podman inspect -f '{{.Config.Image}} {{.State.Status}}' svws-local-server 2>/dev/null || echo "not created")${expected:+  (SchILD expects $expected)}
-  SVWS-Tools          $(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","?"))' "$DATA/apps/versions.json" 2>/dev/null || echo "not installed")
+  SchILD-NRW 3      ${schild:-not installed}   (Wine $(sed 's/\.tar\.xz$//' "$WINE_DIR/.source" 2>/dev/null || echo "not installed"))
+  SVWS-Server       $(podman inspect -f '{{.ImageName}} {{.State.Status}}' "$POD-server" 2>/dev/null || echo "not created")${expected:+   (SchILD expects $expected)}
+  SVWS-Tools        $(py_json_get "$DATA/apps/versions.json" version || echo "not installed")
 
 ${c_bold}Web${c_off}
-  SVWS-Client         https://localhost:$SVWS_PORT          (user Admin, empty password)
-  SVWS-Tools          https://localhost:$SVWS_PORT/app/start/
+  SVWS-Client       https://localhost:$SVWS_PORT        (Admin, empty password)
+  SVWS-Tools        https://localhost:$SVWS_PORT/app/start/
 
-${c_bold}SchILD_DBConfig connection${c_off}
-  Datenbank           Server localhost, Port $DB_PORT, Datenbank ${MARIADB_DATABASE:-}
-                      Benutzer ${MARIADB_USER:-}, Kennwort ${MARIADB_PASSWORD:-}
-  SVWS-Server         localhost:$SVWS_PORT
-  SchILD login        Admin, empty password
+${c_bold}SchILD_DBConfig${c_off}
+  Datenbank         Server localhost, Port $DB_PORT, Datenbank ${MARIADB_DATABASE:-}
+                    Benutzer ${MARIADB_USER:-}, Kennwort ${MARIADB_PASSWORD:-}
+  SVWS-Server       localhost:$SVWS_PORT
+  SchILD login      Admin, empty password
 EOF
+}
+
+ensure_server() {
+  server_alive && return
+  server_version_resolve
+  step "Starting SVWS-Server"; server_up
 }
 
 case ${1:-} in
   setup)      cmd_setup ;;
   update)     cmd_update ;;
-  schild)     preflight; require_bottle; server_version_resolve >/dev/null
-              server_alive || { step "Starting SVWS-Server"; server_up; }; schild_run SchILD30.exe ;;
-  dbconfig)   preflight; require_bottle; server_version_resolve >/dev/null
-              server_alive || { step "Starting SVWS-Server"; server_up; }; schild_run SchILD_DBConfig.exe ;;
-  up)         require_bottle; server_version_resolve; server_up; ok "https://localhost:$SVWS_PORT" ;;
-  down)       require_bottle; server_version_resolve >/dev/null; compose down ;;
+  desktop)    desktop_install ;;
+  schild)     preflight; require_prefix; ensure_server; schild_run SchILD30.exe ;;
+  dbconfig)   preflight; require_prefix; ensure_server; schild_run SchILD_DBConfig.exe ;;
+  up)         require_prefix; ensure_server; ok "https://localhost:$SVWS_PORT" ;;
+  down)       server_down ;;
   status)     cmd_status ;;
-  logs)       podman logs -f svws-local-server ;;
-  reports)    reports_sync ;;
+  logs)       server_logs ;;
+  reports)    require_prefix; reports_sync ;;
   tools)      tools_install ;;
-  fonts)      bottle_fonts ;;
-  trust-cert) bottle_trust_cert ;;
-  test)       bottle_test ;;
-  reset-db)   require_bottle; server_version_resolve; server_reset_db ;;
+  fonts)      require_prefix; prefix_fonts ;;
+  trust-cert) require_prefix; prefix_trust_cert ;;
+  test)       require_prefix; prefix_test ;;
+  reset-db)   require_prefix; server_version_resolve; server_reset_db; prefix_trust_cert ;;
+  wine)       shift; wine "$@" ;;
   -h|--help|help|"") usage ;;
   *)          usage; exit 1 ;;
 esac

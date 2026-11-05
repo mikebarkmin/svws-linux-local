@@ -5,10 +5,9 @@ A local **SVWS-NRW test environment on Linux**, set up by one command:
 - **SVWS-Server** + MariaDB in Podman, with the official test school
   ("Albert Zweistein Gymnasium")
 - **SVWS-Tools** web apps (Konferenz, Import, Prognos, GradeHub, Laufbahnplanung)
-- **SchILD-NRW 3** in a [Bottles](https://usebottles.com/) bottle (Wine), already
-  connected to the server
+- **SchILD-NRW 3** in Wine, already trusting the server
 - **All report collections** for SchILD-NRW 3 (base reports and report cards for
-  GS, Sek I, Sek II, BK, WBK), synced from GitHub
+  GS, Sek I, Sek II, BK, WBK), straight from GitHub
 
 > ⚠️ For testing, development and training only. Do not use with real school data.
 > This project is not affiliated with the SVWS-NRW project or the
@@ -16,47 +15,56 @@ A local **SVWS-NRW test environment on Linux**, set up by one command:
 
 ## Requirements
 
-- Linux with `podman`, `podman-compose`, `flatpak`, `curl`, `git`, `openssl`, `rsync`,
-  `unzip`, `cabextract`, `python3`
-- Bottles from Flathub: `flatpak install flathub com.usebottles.bottles`
-- Optional: Microsoft TrueType fonts (Segoe UI, Tahoma, …) from a Windows licence
-  you own, in `~/.local/share/fonts/Microsoft` (see [fonts](#fonts))
+Only three programs are needed. Everything else, including Wine, is downloaded into this folder:
+
+| Program | Arch | Debian / Ubuntu | Fedora |
+|---|---|---|---|
+| podman | `pacman -S podman` | `apt install podman` | preinstalled |
+| curl, python3 | usually preinstalled | `apt install curl python3` | preinstalled |
+
+- x86_64 Linux desktop (X11 or Wayland)
+- The Wine build is self-contained and needs no 32-bit system libraries. It uses common
+  desktop libraries (GnuTLS, FreeType, fontconfig), which every desktop distribution ships.
+- Optional: Microsoft TrueType fonts (Segoe UI, Tahoma, …) from a Windows licence you
+  own, in `~/.local/share/fonts/Microsoft` (see [fonts](#fonts)).
 
 ## Quick start
 
 ```sh
 git clone https://github.com/mikebarkmin/svws-linux-local.git
 cd svws-linux-local
-./svws setup        # 10–15 min on first run
+./svws setup        # ~5 min, downloads ~400 MB
 ./svws dbconfig     # once: create the database connection (values from the setup output)
 ./svws schild       # start SchILD-NRW 3
+./svws desktop      # optional: menu entries
 ```
 
-`./svws setup` is idempotent and can be re-run at any time. It:
+`./svws setup` can be re-run at any time. It:
 
 1. creates `.env` with random passwords,
-2. downloads the Wine runner **Kron4ek 11.20** into Bottles (the default `soda` runner
-   breaks SchILD's HTTPS connection, see [troubleshooting](docs/troubleshooting.md)),
-3. creates the bottle `SchILD3`, installs Microsoft Jet 4.0 SP8 and the VB6 runtime
-   (needed by the SchILD installer) and installs the latest
-   [SchILD-NRW 3 release](https://github.com/SVWS-NRW/Schild-NRW-3/releases) silently,
-4. starts the **SVWS-Server version SchILD expects** (read from SchILD's `server.json`),
-   with a generated TLS certificate, and imports the test data on the first start,
-5. installs the [SVWS-Tools](https://github.com/SVWS-NRW/SVWS-Tools) web apps,
-6. syncs all report collections into `C:\SVWS-Arbeitsverzeichnis\Schild-Reports`,
-7. trusts the certificate inside the bottle and sets up readable fonts,
-8. tests the HTTPS connection from inside the bottle, as SchILD does it.
+2. downloads a portable Wine build ([Kron4ek](https://github.com/Kron4ek/Wine-Builds)
+   11.20 wow64) to `cache/wine` and creates the Wine prefix `data/prefix`,
+3. installs Microsoft Jet 4.0 SP8, MDAC 2.8 SP1 (ADO) and the VB6 runtime, which SchILD
+   needs,
+4. installs the latest [SchILD-NRW 3 release](https://github.com/SVWS-NRW/Schild-NRW-3/releases)
+   silently,
+5. starts the **SVWS-Server version SchILD expects** (read from SchILD's `server.json`)
+   and imports the test data on the first start,
+6. installs the [SVWS-Tools](https://github.com/SVWS-NRW/SVWS-Tools) web apps,
+7. links all report collections into `C:\SVWS-Arbeitsverzeichnis\Schild-Reports`,
+8. makes Wine trust the server certificate and sets up readable fonts,
+9. tests the HTTPS connection from inside Wine, as SchILD does it.
 
 ### Connect SchILD (once)
 
-The password in SchILD's connection file is encrypted, so the connection is created in
+SchILD stores the connection with an encrypted password, so it is created in
 `SchILD_DBConfig` (`./svws dbconfig`). `./svws status` shows the values:
 
 | Section | Field | Value |
 |---|---|---|
 | Datenbank | Server / Port | `localhost` / `3306` |
 | | Datenbank | `svwsdb` |
-| | Benutzer / Kennwort | `svwsuser` / *(from `.env`)* |
+| | Benutzer / Kennwort | `svwsuser` / `svwspass` |
 | SVWS-Server | Adresse | `localhost:8443` |
 
 Log in to SchILD and the SVWS-Client as **`Admin` with an empty password** (test data).
@@ -69,15 +77,17 @@ Log in to SchILD and the SVWS-Client as **`Admin` with an empty password** (test
 | `./svws update` | Update SchILD, server version, SVWS-Tools and reports |
 | `./svws schild` | Start the server (if needed) and SchILD-NRW 3 |
 | `./svws dbconfig` | Start SchILD_DBConfig |
-| `./svws up` / `down` | Start / stop the server containers |
+| `./svws desktop` | Add menu entries for SchILD and DBConfig |
+| `./svws up` / `down` | Start / stop the server |
 | `./svws status` | Versions, URLs, access data |
 | `./svws logs` | Follow the server log |
-| `./svws reports` | Sync the report collections only |
+| `./svws reports` | Update the report collections only |
 | `./svws tools` | Install/update the SVWS-Tools only |
-| `./svws fonts` | Re-apply the font setup in the bottle |
-| `./svws trust-cert` | Re-import the server certificate into the bottle |
-| `./svws test` | HTTPS test from inside the bottle |
+| `./svws fonts` | Re-apply the font setup |
+| `./svws trust-cert` | Re-import the server certificate into Wine |
+| `./svws test` | HTTPS test from inside Wine |
 | `./svws reset-db` | Replace the database with fresh test data |
+| `./svws wine …` | Run a command in the Wine prefix, e.g. `./svws wine winecfg` |
 
 ## Web
 
@@ -87,17 +97,16 @@ Log in to SchILD and the SVWS-Client as **`Admin` with an empty password** (test
 | SVWS-Tools start page | https://localhost:8443/app/start/ |
 | Konferenz / Import / Prognos / GradeHub / Laufbahnplanung | `https://localhost:8443/app/{konferenz,import,prognos,gradehub,laufbahn}/` |
 
-The browser warns about the self-signed certificate once. You can import
-`data/certs/svws.crt` into your browser to avoid the warning.
+The server uses a self-signed certificate. The browser warns once.
 
-The tiles on the start page are configured in `data/apps/start/sichtbarkeit.js`
+The tiles on the start page are set in `data/apps/start/sichtbarkeit.js`
 (initially copied from [`config/sichtbarkeit.js`](config/sichtbarkeit.js)).
 
 ## Reports
 
 [`config/reports.conf`](config/reports.conf) lists the collections. Each repository is
-cloned to `cache/repos/`, and the files of its official release (listed in its
-`.zipallow`) are copied to `C:\SVWS-Arbeitsverzeichnis\Schild-Reports\<folder>`:
+downloaded to `cache/reports/<repo>`, and the files of its official release (listed in its
+`.zipallow`) are **linked** into `C:\SVWS-Arbeitsverzeichnis\Schild-Reports\<folder>`:
 
 | Folder | Repository |
 |---|---|
@@ -109,44 +118,43 @@ cloned to `cache/repos/`, and the files of its official release (listed in its
 | `Zeugnisse WBK` | [Schild-NRW-3-Zeugnisse-WBK](https://github.com/SVWS-NRW/Schild-NRW-3-Zeugnisse-WBK) |
 | `Legacy/…` | [Schild-NRW-Reports](https://github.com/SVWS-NRW/Schild-NRW-Reports), [Schild-NRW-Zeugnisse-Sek1](https://github.com/SVWS-NRW/Schild-NRW-Zeugnisse-Sek1), [Schild-NRW-Zeugnisse-Sek2](https://github.com/SVWS-NRW/Schild-NRW-Zeugnisse-Sek2) (older collections) |
 
-Files are copied, not linked, because the Bottles flatpak cannot access this repository.
-`./svws reports` updates them. Don't edit files in the synced folders; changes are
-overwritten. Put your own reports in a separate folder.
+`./svws reports` downloads a collection again only when its repository has new commits.
+An update replaces everything in the linked folders, so keep your own reports in a
+separate folder.
 
 ## Fonts
 
 SchILD uses **Segoe UI** and **Tahoma**. If `FONT_SRC` (default
-`~/.local/share/fonts/Microsoft`) contains the Microsoft TrueType files, they are
-copied into the bottle. Otherwise Segoe UI is mapped to Wine's built-in Tahoma. Microsoft
-fonts are not part of this repository and must come from a licence you own.
+`~/.local/share/fonts/Microsoft`) contains the Microsoft TrueType files, they are copied
+into the prefix. Otherwise Segoe UI is mapped to Wine's built-in Tahoma. Microsoft fonts
+are not part of this repository; take them from a Windows licence you own.
 
 ## Desktop notes
 
 - **Hyprland:** SchILD shows an extra empty window. Add the rule from
   [`contrib/hyprland/`](contrib/hyprland) to your config.
-- Other desktops: see [docs/troubleshooting.md](docs/troubleshooting.md#empty-white-window-schild-nrw-3).
+- More problems and their causes: [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Layout
 
 ```
 svws                 command-line entry point
-lib/                 server, bottle, report logic
-compose.yaml         SVWS-Server + MariaDB (podman-compose)
+lib/                 wine, server and report logic
 .env.example         settings; copied to .env (gitignored) by setup
 config/              report list, tile visibility
 contrib/             desktop-specific snippets
 docs/                troubleshooting
-data/  (gitignored)  database, server config + keystore + logs, web apps, certificate
-cache/ (gitignored)  downloads and cloned report repositories
+data/  (gitignored)  Wine prefix, database, server config + keystore + logs, web apps
+cache/ (gitignored)  downloads, Wine build, report collections
 ```
 
 ## Uninstall
 
 ```sh
 ./svws down
-podman unshare rm -rf data          # database etc. belong to the container user
-rm -rf cache .env
-flatpak run --command=bottles-cli com.usebottles.bottles list bottles   # then delete "SchILD3" in Bottles
+podman pod rm -f svws-local
+podman unshare rm -rf data          # database files belong to the container user
+rm -rf cache .env ~/.local/share/applications/svws-*.desktop
 ```
 
 ## License
@@ -156,6 +164,6 @@ The scripts and configuration in this repository are licensed under the
 
 The software they download is not included and keeps its own licences:
 SVWS-Server and SVWS-Tools (BSD-3-Clause), SchILD-NRW 3 and the report collections
-(see the respective [SVWS-NRW repositories](https://github.com/SVWS-NRW)), the Wine
-runner (LGPL), MariaDB (GPL), Microsoft Jet 4.0 and VB6 runtime (Microsoft EULA, downloaded
-from Microsoft via the Internet Archive, as Bottles and winetricks do).
+(see the respective [SVWS-NRW repositories](https://github.com/SVWS-NRW)), Wine (LGPL),
+MariaDB (GPL), Microsoft Jet 4.0, MDAC 2.8 and VB6 runtime (Microsoft EULA, downloaded from
+Microsoft via the Internet Archive, as winetricks does).
