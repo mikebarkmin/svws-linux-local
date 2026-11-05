@@ -1,0 +1,8 @@
+# local configuration with generated passwords
+.env
+
+# runtime data: database, server config/keystore/logs, web apps, certificates
+/data/
+
+# downloads (installers, runner, release zips) and cloned report repositories
+/cache/

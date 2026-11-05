@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# svws-linux-local – SVWS-Server + SVWS-Tools (podman) and SchILD-NRW 3 (Bottles/Wine) on Linux.
+set -euo pipefail
+. "$(dirname "$(readlink -f "$0")")/lib/common.sh"
+. "$ROOT/lib/server.sh"
+. "$ROOT/lib/bottle.sh"
+. "$ROOT/lib/reports.sh"
+
+usage() {
+  cat <<EOF
+Usage: ./svws <command>
+
+Setup
+  setup          Install everything: Wine runner, bottle, SchILD-NRW 3, SVWS-Server,
+                 SVWS-Tools, reports, certificate, fonts (idempotent, re-run any time)
+  update         Update SchILD-NRW 3, server version, SVWS-Tools and all reports
+
+Daily use
+  schild         Start the server (if needed) and SchILD-NRW 3
+  dbconfig       Start SchILD_DBConfig (create the database connection)
+  up | down      Start / stop the SVWS-Server containers
+  status         Show versions, URLs and access data
+  logs           Follow the SVWS-Server log
+
+Maintenance
+  reports        Sync the report collections only
+  tools          Install/update the SVWS-Tools web apps only
+  fonts          Re-apply font setup in the bottle
+  trust-cert     Re-import the server certificate into the bottle
+  test           Test the HTTPS connection from inside the bottle (like SchILD does)
+  reset-db       Replace the database with fresh SVWS test data
+EOF
+}
+
+preflight() {
+  need podman podman-compose flatpak curl git openssl rsync unzip python3 cabextract
+  flatpak info "$FLATPAK_APP" >/dev/null 2>&1 \
+    || die "Bottles is not installed: flatpak install flathub $FLATPAK_APP"
+}
+
+cmd_setup() {
+  preflight
+  env_init
+  runner_install
+  bottle_create
+  jet40_install
+  vb6_install
+  schild_install
+  server_version_resolve
+  cert_init
+  server_first_start
+  tools_install
+  reports_sync
+  step "Configuring bottle"
+  bottle_trust_cert
+  bottle_fonts
+  step "Testing HTTPS from inside the bottle"
+  bottle_test && ok "SchILD can reach the SVWS-Server" || warn "connection test failed – see docs/troubleshooting.md"
+  echo
+  cmd_status
+  cat <<EOF
+
+${c_bold}Next step (once):${c_off} ./svws dbconfig  → create a connection with the values above,
+then start SchILD with: ./svws schild
+EOF
+}
+
+cmd_update() {
+  preflight
+  require_bottle
+  schild_install
+  server_version_resolve
+  local running
+  running=$(podman inspect -f '{{.Config.Image}}' svws-local-server 2>/dev/null | sed 's/.*://' || true)
+  if [[ $running != "$SVWS_VERSION" ]]; then
+    step "Switching SVWS-Server ${running:-?} → $SVWS_VERSION"
+    server_recreate
+  fi
+  tools_install
+  reports_sync
+}
+
+cmd_status() {
+  local prefix schild expected
+  prefix=$(bottle_path || true)
+  if [[ -n $prefix ]]; then PREFIX=$prefix; require_bottle; schild=$(schild_installed_version); expected=$(schild_expected_server); fi
+  cat <<EOF
+${c_bold}SVWS Linux Local${c_off}
+  SchILD-NRW 3        ${schild:-not installed}   (bottle "$BOTTLE_NAME", runner $WINE_RUNNER)
+  SVWS-Server         $(podman inspect -f '{{.Config.Image}} {{.State.Status}}' svws-local-server 2>/dev/null || echo "not created")${expected:+  (SchILD expects $expected)}
+  SVWS-Tools          $(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","?"))' "$DATA/apps/versions.json" 2>/dev/null || echo "not installed")
+
+${c_bold}Web${c_off}
+  SVWS-Client         https://localhost:$SVWS_PORT          (user Admin, empty password)
+  SVWS-Tools          https://localhost:$SVWS_PORT/app/start/
+
+${c_bold}SchILD_DBConfig connection${c_off}
+  Datenbank           Server localhost, Port $DB_PORT, Datenbank ${MARIADB_DATABASE:-}
+                      Benutzer ${MARIADB_USER:-}, Kennwort ${MARIADB_PASSWORD:-}
+  SVWS-Server         localhost:$SVWS_PORT
+  SchILD login        Admin, empty password
+EOF
+}
+
+case ${1:-} in
+  setup)      cmd_setup ;;
+  update)     cmd_update ;;
+  schild)     preflight; require_bottle; server_version_resolve >/dev/null
+              server_alive || { step "Starting SVWS-Server"; server_up; }; schild_run SchILD30.exe ;;
+  dbconfig)   preflight; require_bottle; server_version_resolve >/dev/null
+              server_alive || { step "Starting SVWS-Server"; server_up; }; schild_run SchILD_DBConfig.exe ;;
+  up)         require_bottle; server_version_resolve; server_up; ok "https://localhost:$SVWS_PORT" ;;
+  down)       require_bottle; server_version_resolve >/dev/null; compose down ;;
+  status)     cmd_status ;;
+  logs)       podman logs -f svws-local-server ;;
+  reports)    reports_sync ;;
+  tools)      tools_install ;;
+  fonts)      bottle_fonts ;;
+  trust-cert) bottle_trust_cert ;;
+  test)       bottle_test ;;
+  reset-db)   require_bottle; server_version_resolve; server_reset_db ;;
+  -h|--help|help|"") usage ;;
+  *)          usage; exit 1 ;;
+esac
